@@ -1,0 +1,123 @@
+<?xml  version="1.0" encoding="UTF-8"?>
+<beans xmlns="http://www.springframework.org/schema/beans"
+       xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+       xmlns:context="http://www.springframework.org/schema/context"
+       xmlns:p="http://www.springframework.org/schema/p"
+       xmlns:security="http://www.springframework.org/schema/security"
+       xmlns:task="http://www.springframework.org/schema/task"
+       xmlns:tx="http://www.springframework.org/schema/tx"
+       xsi:schemaLocation="http://www.springframework.org/schema/beans
+       http://www.springframework.org/schema/beans/spring-beans.xsd
+       http://www.springframework.org/schema/security
+                           http://www.springframework.org/schema/security/spring-security-3.1.xsd
+        http://www.springframework.org/schema/context http://www.springframework.org/schema/context/spring-context.xsd
+        http://www.springframework.org/schema/tx http://www.springframework.org/schema/tx/spring-tx.xsd
+        http://www.springframework.org/schema/task http://www.springframework.org/schema/task/spring-task.xsd">
+
+    <tx:annotation-driven transaction-manager="transactionManager"/>
+    <!-- @Annotation-based configuration-->
+    <context:annotation-config/>
+
+    <!--Tasks-->
+    <task:annotation-driven/>
+
+    <bean id="transactionManager"
+          class="org.springframework.orm.hibernate3.HibernateTransactionManager">
+        <property name="sessionFactory" ref="sessionFactory"/>
+    </bean>
+
+    <!-- Directories for @Service @Component  -->
+    <context:component-scan base-package="com.teaminternational.mail.dao"/>
+    <context:component-scan base-package="com.teaminternational.mail.service"/>
+    <context:component-scan base-package="com.teaminternational.mail.security"/>
+
+    <!-- Data Access Configuration -->
+    <bean id="addressBookService" class="com.teaminternational.mail.service.AddressBookServiceImpl"/>
+
+    <bean id="MyPropertiesHolder" class="com.teaminternational.mail.service.PropertyHolder">
+        <property name="imapMailStoreProtocol" value="imaps" />
+        <property name="imapHost" value="imap.googlemail.com" />
+        <property name="pop3SocketFactoryClass" value="javax.net.ssl.SSLSocketFactory" />
+        <property name="pop3SocketFactoryPort" value="995" />
+        <property name="pop3Host" value="pop3.gmail.com" />
+        <property name="pop3Port" value="995" />
+        <property name="pop3Protocol" value="pop3" />
+    </bean>
+
+    <bean id="mailSender" class="org.springframework.mail.javamail.JavaMailSenderImpl">
+        <property name="host" value="smtp.gmail.com"/>
+        <property name="port" value="587"/>
+
+        <property name="javaMailProperties">
+            <props>
+                <prop key="mail.transport.protocol">smtp</prop>
+                <prop key="mail.smtp.auth">true</prop>
+                <prop key="mail.smtp.starttls.enable">true</prop>
+            </props>
+        </property>
+
+    </bean>
+
+    <!-- dataSource -->
+    <bean id="dataSource"
+          class="org.springframework.jdbc.datasource.DriverManagerDataSource"
+          p:driverClassName="com.mysql.jdbc.Driver"
+          p:url="jdbc:mysql://localhost:3306/webmail?createDatabaseIfNotExist=true"
+          p:username="root"
+          p:password="1"/>
+
+    <!-- hibernate sessionFactory -->
+    <bean id="sessionFactory"
+          class="org.springframework.orm.hibernate3.LocalSessionFactoryBean">
+        <property name="dataSource" ref="dataSource"/>
+        <property name="configLocation">
+            <value>classpath:hibernate.cfg.xml</value>
+        </property>
+        <property name="configurationClass">
+            <value>org.hibernate.cfg.AnnotationConfiguration</value>
+        </property>
+        <property name="hibernateProperties">
+            <props>
+                <prop key="hibernate.show_sql">false</prop>
+                <prop key="hibernate.dialect">org.hibernate.dialect.MySQLDialect</prop>
+                <prop key="hibernate.connection.charSet">UTF-8</prop>
+                <prop key="hibernate.hbm2ddl.auto">update</prop>
+            </props>
+        </property>
+    </bean>
+
+    <security:http auto-config="true" access-denied-page="/accessDenied.jsp">
+        <security:session-management session-fixation-protection="migrateSession"
+                                     session-authentication-error-url="/login">
+            <security:concurrency-control max-sessions="1" error-if-maximum-exceeded="false" expired-url="/login"
+                                          session-registry-alias="sessionRegistry"/>
+
+        </security:session-management>
+        <security:intercept-url pattern="/login*" access="ROLE_ANONYMOUS, ROLE_USER, ROLE_ADMIN"/>
+        <security:intercept-url pattern="/register*" access="ROLE_ANONYMOUS, ROLE_USER, ROLE_ADMIN"/>
+        <security:intercept-url pattern="/mail/**" access="ROLE_USER, ROLE_ADMIN"/>
+        <security:intercept-url pattern="/address/**" access="ROLE_USER, ROLE_ADMIN"/>
+        <security:intercept-url pattern="/admin/**" access="ROLE_ADMIN"/>
+        <security:form-login login-page="/login" default-target-url="/mail/inbox"
+                             authentication-failure-url="/login"/>
+        <security:logout logout-success-url="/login"/>
+        <security:anonymous username="guest" granted-authority="ROLE_ANONYMOUS"/>
+        <security:remember-me key="webMailKey" token-validity-seconds="2419200"
+                              user-service-ref="userDetailsService"/>
+    </security:http>
+
+    <bean id="userDetailsService"
+          class="com.teaminternational.mail.security.UserDetailsServiceImpl">
+    </bean>
+
+    <security:authentication-manager>
+        <security:authentication-provider user-service-ref="userDetailsService">
+            <security:password-encoder ref="passwordEncoder">
+            </security:password-encoder>
+        </security:authentication-provider>
+    </security:authentication-manager>
+
+    <bean id="passwordEncoder" class="org.springframework.security.authentication.encoding.PlaintextPasswordEncoder"/>
+
+
+</beans>

@@ -1,0 +1,213 @@
+package com.teaminternational.mail.service;
+
+import com.sun.mail.imap.IMAPFolder;
+import com.sun.mail.pop3.POP3SSLStore;
+import com.teaminternational.mail.dao.MessageDAO;
+import com.teaminternational.mail.domain.Message;
+import com.teaminternational.mail.domain.User;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.mail.MailParseException;
+import org.springframework.mail.MailSendException;
+import org.springframework.mail.SimpleMailMessage;
+import org.springframework.mail.javamail.JavaMailSenderImpl;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+
+import javax.mail.*;
+import java.io.IOException;
+import java.util.*;
+import java.util.concurrent.CopyOnWriteArrayList;
+
+/**
+ * User: Vladislav Povedyuk
+ * Date: 24.10.13
+ */
+
+@Service
+public class MailServiceImpl implements MailService {
+    private final List<Message> deliveryList = new CopyOnWriteArrayList<Message>();
+
+    @Autowired
+    @Qualifier("MyPropertiesHolder")
+    private PropertyHolder holder;
+
+    @Autowired
+    private MessageDAO messageDAO;
+
+    @Autowired
+    private JavaMailSenderImpl mailSender;
+
+    public List<Message> getDeliveryList() {
+        return deliveryList;
+    }
+
+    /**
+     * Scheduled task which delivers messages from deliveryList to User's email box. Starts every 30 seconds.
+     * If the email address of receiver is not correct it will catch this and make "Delivery failed message"
+     * which will be delivered to sender (like in gmail).
+     *
+     * If there are a few similar addresses one copy of a message will be delivered only once.
+     *
+     * If connection to smtp server is broken it will show exception message and messages will still be in
+     * deliveryList, after connection appears messages will be delivered to Users.
+     */
+    @Scheduled(fixedDelay = 30000)
+    @Transactional
+    public void sendEmail() {
+        System.out.println("Scheduled sending started");
+        Message currentMessage = new Message();
+        try {
+            for (Message message : deliveryList) {
+                currentMessage = message;
+                mailSender.setUsername(message.getUser().getEmail());
+                mailSender.setPassword(message.getUser().getPassword());
+                SimpleMailMessage email = new SimpleMailMessage();
+                email.setFrom(message.getSender());
+                Set<String> receivers = new HashSet<String>(Arrays.asList(message.getReceivers().split(", |,|' '| ,")));
+                for (String receiver : receivers) {
+                    email.setTo(receiver);
+                    email.setSubject(message.getSubject());
+                    email.setText(message.getText());
+                    mailSender.send(email);
+                }
+                if (!message.getSender().equals("webmail.mailer.daemon@gmail.com")) {
+                    saveEmail(message);
+                }
+                deliveryList.remove(message);
+            }
+        } catch (MailParseException mpe) {
+            User daemon = new User();
+            daemon.setEmail("webmail.mailer.daemon@gmail.com");
+            daemon.setPassword("80978051488");
+            Message failed = new Message();
+            failed.setReceivers(currentMessage.getSender());
+            failed.setSender(daemon.getEmail());
+            failed.setSubject("Mail delivery failed");
+            failed.setText("Delivery failed due to " + mpe.getMessage() + " in " + currentMessage.getReceivers());
+            failed.setUser(daemon);
+            addMessageToDelivery(failed);
+            deliveryList.remove(currentMessage);
+        } catch (MailSendException mse) {
+            System.out.println("Internet connection broken " + mse.getMessage());
+        }
+    }
+
+    /**
+     * Adding message to deliveryList which is used by Scheduled task as messages source
+     *
+     * @param message actually, message to deliver
+     */
+    public void addMessageToDelivery(Message message) {
+        message.setDate(new Date());
+        deliveryList.add(message);
+    }
+
+    /**
+     * Saving a successfully send email to the database
+     *
+     * @param message actually, message to save
+     */
+    @Transactional(propagation = Propagation.NESTED)
+    public void saveEmail(Message message) {
+        message.setDate(new Date());
+        messageDAO.saveMessage(message);
+    }
+
+    /**
+     * Gets the List of sent Messages by user
+     *
+     * @param user user which called the sent messages page
+     * @return list of messages which current user send before
+     */
+    @Transactional
+    public List<Message> getSentMessages(User user) {
+        return messageDAO.getSentMessages(user);
+    }
+
+    /**
+     * Gets inbox from smtp server with imap protocol
+     *
+     * @param user who's messages well be loaded
+     * @return List of inbox Messages for current user
+     * @throws MessagingException if there is no connection to smtp host
+     */
+    @Transactional
+    public List<Message> getInboxImap(final User user) throws MessagingException {
+        List<Message> result = new ArrayList<Message>();
+        Properties props = new Properties();
+        try {
+            props.setProperty("mail.store.protocol", holder.getImapMailStoreProtocol());
+            Session session = Session.getDefaultInstance(props, null);
+            Store store = session.getStore(holder.getImapMailStoreProtocol());
+            store.connect(holder.getImapHost(), user.getEmail(), user.getPassword());
+            IMAPFolder folder = (IMAPFolder) store.getFolder("INBOX");
+            if (!folder.isOpen()) {
+                folder.open(Folder.READ_ONLY);
+            }
+            javax.mail.Message[] messages = folder.getMessages();
+
+            for (int i = messages.length - 1; i >= 0; i--) {
+                Message inboxMessage = new Message();
+                inboxMessage.setSender(messages[i].getFrom()[0].toString());
+                inboxMessage.setReceivers(messages[i].getAllRecipients()[0].toString());
+                inboxMessage.setSubject(messages[i].getSubject());
+                inboxMessage.setText(messages[i].getContent().toString());
+                inboxMessage.setDate(messages[i].getReceivedDate());
+                result.add(inboxMessage);
+            }
+            folder.close(false);
+        } catch (MessagingException e) {
+            throw new MessagingException("No connection to host");
+        } catch (IOException ioe) {
+            throw new MessagingException("No connection, unable to get message content");
+        }
+
+        return result;
+    }
+
+    /**
+     * Gets inbox from smtp server with pop3 protocol
+     *
+     * @param user who's messages well be loaded
+     * @return List of inbox Messages for current user
+     * @throws MessagingException if there is no connection to smtp host
+     */
+    @Transactional
+    public List<Message> getInboxPop3(User user) throws MessagingException {
+        Properties pop3Props = new Properties();
+        List<Message> result = new ArrayList<Message>();
+        try {
+            pop3Props.setProperty("mail.pop3.socketFactory.class", holder.getPop3SocketFactoryClass());
+            pop3Props.setProperty("mail.pop3.socketFactory.port", holder.getPop3SocketFactoryPort());
+            pop3Props.setProperty("mail.pop3.port", holder.getPop3Port());
+            URLName url = new URLName(holder.getPop3Protocol(), holder.getPop3Host(),
+                    Integer.parseInt(holder.getPop3Port()), "", "recent:" + user.getEmail(), user.getPassword());
+            Session session = Session.getInstance(pop3Props, null);
+            POP3SSLStore store = new POP3SSLStore(session, url);
+            store.connect();
+            Folder inbox = store.getDefaultFolder();
+            inbox = inbox.getFolder("inbox");
+            inbox.open(Folder.READ_ONLY);
+            javax.mail.Message[] messages = inbox.getMessages();
+            for (int i = messages.length - 1; i >= 0; i--) {
+                Message inboxMessage = new Message();
+                inboxMessage.setSender(messages[i].getFrom()[0].toString());
+                inboxMessage.setReceivers(messages[i].getAllRecipients()[0].toString());
+                inboxMessage.setSubject(messages[i].getSubject());
+                inboxMessage.setText(messages[i].getContent().toString());
+                inboxMessage.setDate(messages[i].getSentDate());
+                result.add(inboxMessage);
+            }
+            inbox.close(false);
+            store.close();
+        } catch (MessagingException e) {
+            throw new MessagingException("No connection to host");
+        } catch (IOException ioe) {
+            throw new MessagingException("No connection, unable to get message content");
+        }
+        return result;
+    }
+}
